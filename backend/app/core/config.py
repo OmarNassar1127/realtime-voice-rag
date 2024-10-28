@@ -11,7 +11,7 @@ class Settings:
 
     # OpenAI Configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4o-audio-preview")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4o-realtime-preview-2024-10-01")
 
     # Server Configuration
     HOST: str = os.getenv("HOST", "localhost")
