@@ -230,10 +230,10 @@ const VoiceRecorder = () => {
           sendMessage(JSON.stringify({
             type: 'input_audio_buffer.append',
             audio: base64Audio,
-            format: {
-              type: 'pcm16',
-              sampling_rate: 24000,
-              channels: 1,
+            audio_config: {
+              encoding: 'pcm16',
+              sample_rate: 24000,
+              num_channels: 1,
               endianness: 'little'
             }
           }))
