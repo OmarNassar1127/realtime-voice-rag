@@ -1,4 +1,3 @@
-javascript
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Button, HStack, Text, useToast, Box } from '@chakra-ui/react'
 import { FaMicrophone, FaStop } from 'react-icons/fa'
@@ -31,9 +30,9 @@ const VoiceRecorder = () => {
     },
     options: {
       headers: {
-        'Authorization': `Bearer ${process.env.REACT_APP_OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1',
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
+        'OpenAI-Beta': 'realtime=v1'
+        // 'Content-Type': 'application/json'
       }
     },
     onOpen: () => {
