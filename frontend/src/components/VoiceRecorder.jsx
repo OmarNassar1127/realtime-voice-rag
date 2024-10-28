@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Button, HStack, Text, useToast, Box } from '@chakra-ui/react'
+import { Button, HStack, Text, useToast, Box, VStack } from '@chakra-ui/react'
 import { FaMicrophone, FaStop } from 'react-icons/fa'
 import useWebSocket from 'react-use-websocket'
 
-const WEBSOCKET_URL = `${import.meta.env.VITE_BACKEND_URL}/ws`
+// Hardcoded WebSocket URL as per documentation
+const WEBSOCKET_URL = 'ws://localhost:8000/ws'
 
 // Function to convert audio buffer to PCM 16-bit
 const convertToPCM16 = (audioBuffer) => {
@@ -20,70 +21,102 @@ const VoiceRecorder = () => {
   const [mediaRecorder, setMediaRecorder] = useState(null)
   const [citations, setCitations] = useState([])
   const [isProcessing, setIsProcessing] = useState(false)
+  const [transcript, setTranscript] = useState('')
   const audioContext = useRef(null)
   const audioQueue = useRef([])
+  const isPlaying = useRef(false)
   const toast = useToast()
-
-  const { sendMessage, lastMessage, readyState } = useWebSocket(`${import.meta.env.VITE_BACKEND_URL}/ws`, {
+  const { sendMessage, lastMessage, readyState } = useWebSocket(WEBSOCKET_URL, {
     onOpen: () => {
       console.log('WebSocket Connected')
-      // Send initial configuration
-      sendMessage(JSON.stringify({
-        type: 'session.create',
-        session: {
-          model: import.meta.env.VITE_MODEL_NAME || 'gpt-4o-realtime-preview-2024-10-01',
+      // Don't send session.create immediately - wait for stable connection
+      setTimeout(() => {
+        try {
+          console.log('Sending session.create message')
+          sendMessage(JSON.stringify({
+            type: 'session.create',
+            session: {
+              model: 'gpt-4o-realtime-preview-2024-10-01',
+              modalities: ['text', 'audio'],
+              voice: 'alloy',
+              input_audio_format: 'pcm16',
+              output_audio_format: 'pcm16'
+            }
+          }))
+        } catch (error) {
+          console.error('Error sending session create message:', error)
+          toast({
+            title: 'Connection Error',
+            description: 'Failed to initialize session',
+            status: 'error',
+            duration: 3000,
+            isClosable: true,
+          })
         }
-      }))
-
-      // Create conversation
-      sendMessage(JSON.stringify({
-        type: 'conversation.create',
-        conversation: {
-          modalities: ['text', 'audio'],
-          instructions: 'You are a helpful assistant that provides both text and audio responses. Use the provided context to answer questions accurately.',
-        }
-      }))
+      }, 1000) // Give connection time to stabilize
     },
     onError: (error) => {
       console.error('WebSocket error:', error)
       toast({
-        title: 'Connection Error',
-        description: 'Could not connect to server. Please check your connection and try again.',
+        title: 'WebSocket Error',
+        description: 'Connection error occurred. Retrying...',
         status: 'error',
-        duration: 5000,
+        duration: 3000,
         isClosable: true,
       })
     },
     onClose: (event) => {
       console.log('WebSocket closed:', event)
-      toast({
-        title: 'Connection Closed',
-        description: event.reason || 'Connection closed unexpectedly',
-        status: 'warning',
-        duration: 5000,
-        isClosable: true,
-      })
+      // Only show toast if it wasn't a normal closure
+      if (event.code !== 1000) {
+        toast({
+          title: 'Connection Closed',
+          description: `Connection closed (${event.code}). ${event.code === 1006 ? 'Abnormal closure' : event.reason}`,
+          status: 'warning',
+          duration: 3000,
+          isClosable: true,
+        })
+      }
     },
-    shouldReconnect: (closeEvent) => {
-      return closeEvent.code !== 1000 // Don't reconnect on normal closure
-    },
-    reconnectInterval: 3000,
-    reconnectAttempts: 5,
+    shouldReconnect: (closeEvent) => closeEvent.code !== 1000 && closeEvent.code !== 1005, // Don't reconnect on normal closure
+    reconnectInterval: (lastAttemptNumber) => Math.min(1000 * Math.pow(2, lastAttemptNumber), 30000),
+    reconnectAttempts: 10,
+    share: false, // Don't share connections
+    retryOnError: true,
+    options: {
+      headers: {
+        'OpenAI-Beta': 'realtime=v1'
+      }
+    }
   })
 
   useEffect(() => {
     if (lastMessage) {
       try {
         const response = JSON.parse(lastMessage.data)
+        console.log('Received WebSocket message:', response)
+
+        if (response.type === 'session.created') {
+          console.log('Session created successfully')
+          toast({
+            title: 'Connected',
+            description: 'Session established successfully',
+            status: 'success',
+            duration: 3000,
+          })
+          return
+        }
 
         if (response.type === 'error') {
           setIsProcessing(false)
+          console.error('Server error:', response.error)
           toast({
             title: 'Server Error',
             description: response.error?.message || response.content,
             status: 'error',
             duration: 3000,
           })
+          return
         }
 
         if (response.type === 'audio_data') {
@@ -105,10 +138,6 @@ const VoiceRecorder = () => {
           setTranscript(prev => prev + '\n' + response.text)
         }
 
-        if (response.type === 'response.end') {
-          setIsProcessing(false)
-        }
-
         if (response.citations) {
           setCitations(response.citations.map(citation => ({
             text: citation.text,
@@ -119,10 +148,17 @@ const VoiceRecorder = () => {
 
         if (response.type === 'response.end') {
           setIsProcessing(false)
+          console.log('Response completed')
         }
       } catch (e) {
-        console.error('Error parsing WebSocket message:', e)
+        console.error('Error parsing WebSocket message:', e, lastMessage.data)
         setIsProcessing(false)
+        toast({
+          title: 'Message Error',
+          description: 'Failed to process server response',
+          status: 'error',
+          duration: 3000,
+        })
       }
     }
   }, [lastMessage, toast])
@@ -132,6 +168,7 @@ const VoiceRecorder = () => {
       audioContext.current = new (window.AudioContext || window.webkitAudioContext)()
     }
 
+    isPlaying.current = true
     while (audioQueue.current.length > 0) {
       const audioData = audioQueue.current.shift()
       try {
@@ -151,6 +188,7 @@ const VoiceRecorder = () => {
         })
       }
     }
+    isPlaying.current = false
   }
 
   const startRecording = async () => {
@@ -175,7 +213,7 @@ const VoiceRecorder = () => {
           const inputData = e.inputBuffer.getChannelData(0)
           const pcmData = convertToPCM16(inputData)
           // Convert PCM data to base64
-          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)))
+          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
 
           // Send audio data in OpenAI Realtime API format
           sendMessage(JSON.stringify({
