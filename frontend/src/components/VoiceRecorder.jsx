@@ -3,7 +3,7 @@ import { Button, HStack, Text, useToast, Box } from '@chakra-ui/react'
 import { FaMicrophone, FaStop } from 'react-icons/fa'
 import useWebSocket from 'react-use-websocket'
 
-const WEBSOCKET_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
+const WEBSOCKET_URL = `${import.meta.env.VITE_BACKEND_URL}/ws`
 
 // Function to convert audio buffer to PCM 16-bit
 const convertToPCM16 = (audioBuffer) => {
@@ -24,23 +24,21 @@ const VoiceRecorder = () => {
   const audioQueue = useRef([])
   const toast = useToast()
 
-  const { sendMessage, lastMessage, readyState } = useWebSocket(WEBSOCKET_URL, {
-    queryParams: {
-      model: 'gpt-4o-realtime-preview-2024-10-01'
-    },
-    options: {
-      headers: {
-        'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
-        // 'Content-Type': 'application/json'
-      }
-    },
+  const { sendMessage, lastMessage, readyState } = useWebSocket(`${import.meta.env.VITE_BACKEND_URL}/ws`, {
     onOpen: () => {
       console.log('WebSocket Connected')
       // Send initial configuration
       sendMessage(JSON.stringify({
-        type: 'response.create',
-        response: {
+        type: 'session.create',
+        session: {
+          model: import.meta.env.VITE_MODEL_NAME || 'gpt-4o-realtime-preview-2024-10-01',
+        }
+      }))
+
+      // Create conversation
+      sendMessage(JSON.stringify({
+        type: 'conversation.create',
+        conversation: {
           modalities: ['text', 'audio'],
           instructions: 'You are a helpful assistant that provides both text and audio responses. Use the provided context to answer questions accurately.',
         }
@@ -50,15 +48,24 @@ const VoiceRecorder = () => {
       console.error('WebSocket error:', error)
       toast({
         title: 'Connection Error',
-        description: 'Could not connect to OpenAI Realtime API. Please check your API key and try again.',
+        description: 'Could not connect to server. Please check your connection and try again.',
         status: 'error',
         duration: 5000,
         isClosable: true,
       })
     },
+    onClose: (event) => {
+      console.log('WebSocket closed:', event)
+      toast({
+        title: 'Connection Closed',
+        description: event.reason || 'Connection closed unexpectedly',
+        status: 'warning',
+        duration: 5000,
+        isClosable: true,
+      })
+    },
     shouldReconnect: (closeEvent) => {
-      console.log('WebSocket closed:', closeEvent)
-      return true
+      return closeEvent.code !== 1000 // Don't reconnect on normal closure
     },
     reconnectInterval: 3000,
     reconnectAttempts: 5,
@@ -80,19 +87,26 @@ const VoiceRecorder = () => {
         }
 
         if (response.type === 'audio_data') {
-          // Queue audio data for playback
+          // Convert base64 audio to ArrayBuffer
           const audioData = atob(response.audio)
           const audioArray = new Uint8Array(audioData.length)
           for (let i = 0; i < audioData.length; i++) {
             audioArray[i] = audioData.charCodeAt(i)
           }
+          // Queue audio for playback
           audioQueue.current.push(audioArray.buffer)
-          playNextAudio()
+          if (!isPlaying.current) {
+            playNextAudio()
+          }
         }
 
         if (response.type === 'text') {
-          // Handle text response
-          console.log('Text response:', response.text)
+          // Update transcript with text response
+          setTranscript(prev => prev + '\n' + response.text)
+        }
+
+        if (response.type === 'response.end') {
+          setIsProcessing(false)
         }
 
         if (response.citations) {
@@ -153,7 +167,6 @@ const VoiceRecorder = () => {
       const audioCtx = new AudioContext({ sampleRate: 24000 })
       const source = audioCtx.createMediaStreamSource(stream)
       const processor = audioCtx.createScriptProcessor(4096, 1, 1)
-
       source.connect(processor)
       processor.connect(audioCtx.destination)
 
@@ -161,13 +174,21 @@ const VoiceRecorder = () => {
         if (readyState === 1) {
           const inputData = e.inputBuffer.getChannelData(0)
           const pcmData = convertToPCM16(inputData)
+          // Convert PCM data to base64
+          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)))
+
+          // Send audio data in OpenAI Realtime API format
           sendMessage(JSON.stringify({
             type: 'input_audio_buffer.append',
-            audio: btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
+            audio: base64Audio
+          }))
+
+          // Commit the audio buffer after sending
+          sendMessage(JSON.stringify({
+            type: 'input_audio_buffer.commit'
           }))
         }
       }
-
       setMediaRecorder({ stream, audioCtx, processor, source })
       setIsRecording(true)
       setIsProcessing(true)
