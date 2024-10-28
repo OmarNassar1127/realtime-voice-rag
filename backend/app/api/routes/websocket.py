@@ -28,10 +28,11 @@ class ConnectionManager:
 
         # Connect to OpenAI's WebSocket
         openai_ws = await websockets.connect(
-            'wss://api.openai.com/v1/audio/realtime',
+            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
             extra_headers={
                 'Authorization': f'Bearer {settings.OPENAI_API_KEY}',
-                'Content-Type': 'audio/webm'
+                'Content-Type': 'application/json',
+                'OpenAI-Beta': 'realtime=v1'
             }
         )
         self.openai_ws_connections[websocket] = openai_ws
@@ -63,16 +64,29 @@ class ConnectionManager:
                     # Get relevant context using RAG
                     context, citations = await self.rag_service.get_context(text)
 
-                    # Format message with context
-                    message = {
-                        "type": "message",
-                        "text": context,
-                        "model": "gpt-4o-realtime-preview"
-                    }
-
-                    # Send context and transcribed text to OpenAI
+                    # Format message for Realtime API
                     openai_ws = self.openai_ws_connections[websocket]
-                    await openai_ws.send(json.dumps(message))
+
+                    # Send audio buffer append event
+                    await openai_ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": audio_data.hex()
+                    }))
+
+                    # Send audio buffer flush event
+                    await openai_ws.send(json.dumps({
+                        "type": "input_audio_buffer.flush"
+                    }))
+
+                    # Send response creation event with context
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create",
+                        "response": {
+                            "modalities": ["text", "audio"],
+                            "instructions": context,
+                            "voice": "alloy"
+                        }
+                    }))
 
                     # Send transcription and citations to client for reference
                     await self.send_message({
@@ -146,11 +160,19 @@ async def handle_openai_responses(websocket: WebSocket):
         while True:
             response = await manager.receive_openai_response(websocket)
             if response:
-                await manager.send_message({
-                    "type": "response",
-                    "content": response,
-                    "status": "success"
-                }, websocket)
+                if response.get("type") == "error":
+                    error_msg = response.get("error", {}).get("message", "Unknown error")
+                    await manager.send_message({
+                        "type": "error",
+                        "content": error_msg,
+                        "status": "error"
+                    }, websocket)
+                elif response.get("type") == "audio_data":
+                    await manager.send_message({
+                        "type": "audio",
+                        "content": response.get("audio"),  # Base64 encoded audio data
+                        "status": "success"
+                    }, websocket)
             await asyncio.sleep(0.1)  # Small delay to prevent busy waiting
     except Exception as e:
         print(f"Error in OpenAI response handler: {str(e)}")
