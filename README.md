@@ -17,6 +17,7 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
 - Poetry (Python dependency management)
 - pnpm (Node.js package manager)
 - OpenAI API key with access to GPT-4o Realtime API
+- A modern web browser with microphone support
 
 ## Local Development Setup
 
@@ -29,16 +30,18 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
 2. **Backend Setup**
    ```bash
    cd backend
-   
+
    # Install Python dependencies using Poetry
    poetry install
-   
+
    # Create .env file from example
    cp ../.env.example .env
-   
-   # Update .env with your OpenAI API key
-   # OPENAI_API_KEY=your_api_key_here
-   
+
+   # Update .env with your OpenAI API key and configuration
+   # OPENAI_API_KEY=your_api_key_here (no quotes needed)
+   # OPENAI_BETA=realtime=v1
+   # MODEL_NAME=gpt-4o-realtime-preview-2024-10-01
+
    # Start the backend server
    poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
@@ -46,16 +49,10 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
 3. **Frontend Setup**
    ```bash
    cd ../frontend
-   
+
    # Install Node.js dependencies
    pnpm install
-   
-   # Create .env file from example
-   cp ../.env.example .env
-   
-   # Update .env with your OpenAI API key
-   # VITE_OPENAI_API_KEY=your_api_key_here
-   
+
    # Start the frontend development server
    pnpm dev
    ```
@@ -64,6 +61,7 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
    - Frontend: http://localhost:5173
    - Backend API: http://localhost:8000
    - API Documentation: http://localhost:8000/docs
+   - WebSocket endpoint: ws://localhost:8000/ws
 
 ## Usage Guide
 
@@ -72,6 +70,7 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
    - Supported formats: PDF, TXT, DOC, DOCX
    - Maximum file size: 50MB
    - Documents are processed and indexed for RAG functionality
+   - View and manage uploaded documents in the document list
 
 2. **Voice Interface**
    - Click the microphone button to start recording
@@ -79,20 +78,24 @@ A real-time voice interface application that uses RAG (Retrieval Augmented Gener
    - The system will process your voice input in real-time
    - Listen to the AI's response through your speakers
    - View relevant citations from your knowledge base
+   - Real-time transcription appears as you speak
 
 3. **Best Practices**
    - Use a quiet environment for better voice recognition
    - Keep questions focused and specific
    - Upload relevant documents to improve answer quality
    - Check citations to verify source information
+   - Ensure stable internet connection for WebSocket communication
 
 ## Environment Variables
 
-Create a `.env` file in both frontend and backend directories using the provided `.env.example` as a template. Required variables include:
+Create a `.env` file in the backend directory using the provided `.env.example` as a template. Required variables include:
 
-- `OPENAI_API_KEY`: Your OpenAI API key (backend)
-- `VITE_OPENAI_API_KEY`: Your OpenAI API key (frontend)
+- `OPENAI_API_KEY`: Your OpenAI API key (required, no quotes needed)
+- `OPENAI_BETA`: Set to 'realtime=v1' for Realtime API access
 - `MODEL_NAME`: OpenAI model name (default: gpt-4o-realtime-preview-2024-10-01)
+- `WEBSOCKET_PATH`: WebSocket endpoint path (default: /ws)
+- `CORS_ORIGINS`: Allowed CORS origins (default: http://localhost:5173)
 - Additional configuration variables as specified in `.env.example`
 
 ## Troubleshooting
