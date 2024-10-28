@@ -6,9 +6,11 @@ import websockets
 import asyncio
 from typing import List, Dict
 import whisper
-from ...services.rag_service import RAGService
+from ...core.rag_manager import RAGManager
 import tempfile
 import os
+import uuid
+import base64
 
 router = APIRouter()
 
@@ -20,11 +22,14 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
         self.openai_ws_connections: Dict[WebSocket, websockets.WebSocketClientProtocol] = {}
         self.whisper_model = whisper.load_model("base")
-        self.rag_service = RAGService()
+        self.rag_manager = RAGManager()
+        self.session_ids: Dict[WebSocket, str] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        session_id = str(uuid.uuid4())
+        self.session_ids[websocket] = session_id
 
         # Connect to OpenAI's WebSocket
         openai_ws = await websockets.connect(
@@ -37,16 +42,39 @@ class ConnectionManager:
         )
         self.openai_ws_connections[websocket] = openai_ws
 
+        # Send initial configuration
+        await openai_ws.send(json.dumps({
+            "type": "configure",
+            "model": "gpt-4o-realtime-preview-2024-10-01",
+            "metadata": {
+                "user_id": "default",
+                "session_id": session_id
+            },
+            "modalities": ["text", "audio"],
+            "voice": "alloy",
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "temperature": 0.8,
+            "max_response_output_tokens": 4096
+        }))
+
     async def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
             if websocket in self.openai_ws_connections:
-                await self.openai_ws_connections[websocket].close()
-                del self.openai_ws_connections[websocket]
+                try:
+                    await self.openai_ws_connections[websocket].close()
+                finally:
+                    del self.openai_ws_connections[websocket]
+            if websocket in self.session_ids:
+                del self.session_ids[websocket]
 
     async def send_message(self, message: Dict, websocket: WebSocket):
         if websocket in self.active_connections:
-            await websocket.send_json(message)
+            try:
+                await websocket.send_json(message)
+            except Exception as e:
+                print(f"Error sending message: {str(e)}")
 
     async def forward_audio(self, audio_data: bytes, websocket: WebSocket):
         if websocket in self.openai_ws_connections:
@@ -62,15 +90,17 @@ class ConnectionManager:
                     text = result["text"].strip()
 
                     # Get relevant context using RAG
-                    context, citations = await self.rag_service.get_context(text)
+                    results = self.rag_manager.query_documents(text)
+                    context = "\n".join([doc["content"] for doc in results])
+                    citations = [{"content": doc["content"], "metadata": doc["metadata"]} for doc in results]
 
                     # Format message for Realtime API
                     openai_ws = self.openai_ws_connections[websocket]
 
-                    # Send audio buffer append event
+                    # Send audio buffer append event with base64 encoded audio
                     await openai_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
-                        "audio": audio_data.hex()
+                        "audio": base64.b64encode(audio_data).decode('utf-8')
                     }))
 
                     # Send audio buffer flush event
@@ -83,7 +113,7 @@ class ConnectionManager:
                         "type": "response.create",
                         "response": {
                             "modalities": ["text", "audio"],
-                            "instructions": context,
+                            "instructions": f"Context: {context}\nUser Query: {text}",
                             "voice": "alloy"
                         }
                     }))
@@ -101,6 +131,7 @@ class ConnectionManager:
                     os.unlink(temp_path)
 
             except Exception as e:
+                print(f"Error in forward_audio: {str(e)}")
                 await self.send_message({
                     "type": "error",
                     "content": f"Error processing audio: {str(e)}",
@@ -114,11 +145,18 @@ class ConnectionManager:
                 response = await openai_ws.recv()
                 return json.loads(response)
             except websockets.exceptions.ConnectionClosed:
+                print("OpenAI WebSocket connection closed")
+                return None
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {str(e)}")
+                return None
+            except Exception as e:
+                print(f"Error receiving OpenAI response: {str(e)}")
                 return None
 
 manager = ConnectionManager()
 
-@router.websocket(settings.WEBSOCKET_PATH)
+@router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
 
@@ -136,12 +174,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
             except Exception as e:
                 # Handle general errors
+                print(f"Unexpected WebSocket error: {str(e)}")
                 await manager.send_message({
                     "type": "error",
                     "content": "An unexpected error occurred while processing audio",
                     "status": "error"
                 }, websocket)
-                print(f"Unexpected WebSocket error: {str(e)}")
 
     except WebSocketDisconnect:
         response_task.cancel()
@@ -160,17 +198,34 @@ async def handle_openai_responses(websocket: WebSocket):
         while True:
             response = await manager.receive_openai_response(websocket)
             if response:
-                if response.get("type") == "error":
+                response_type = response.get("type")
+                if response_type == "error":
                     error_msg = response.get("error", {}).get("message", "Unknown error")
                     await manager.send_message({
                         "type": "error",
                         "content": error_msg,
                         "status": "error"
                     }, websocket)
-                elif response.get("type") == "audio_data":
+                elif response_type == "audio_data":
                     await manager.send_message({
                         "type": "audio",
-                        "content": response.get("audio"),  # Base64 encoded audio data
+                        "content": response.get("audio"),
+                        "status": "success"
+                    }, websocket)
+                elif response_type == "text":
+                    await manager.send_message({
+                        "type": "text",
+                        "content": response.get("text"),
+                        "status": "success"
+                    }, websocket)
+                elif response_type == "session.created":
+                    await manager.send_message({
+                        "type": "session.created",
+                        "status": "success"
+                    }, websocket)
+                elif response_type == "response.completed":
+                    await manager.send_message({
+                        "type": "response.completed",
                         "status": "success"
                     }, websocket)
             await asyncio.sleep(0.1)  # Small delay to prevent busy waiting

@@ -1,9 +1,9 @@
-from app.services.rag_service import RAGService
+from app.core.rag_manager import RAGManager
 import asyncio
 import os
 
 async def test_rag():
-    rag = RAGService()
+    rag = RAGManager()
 
     # Test document addition
     test_docs = [
@@ -36,9 +36,10 @@ async def test_rag():
         # Add document to RAG
         with open(filename, "r") as f:
             content = f.read()
-        doc_id = await rag.add_document(content, {"source": filename})
-        doc_ids.append(doc_id)
-        print(f"Added document with ID: {doc_id}")
+        success = rag.process_document(filename)
+        if success:
+            doc_ids.append(filename)
+            print(f"Added document: {filename}")
 
     # Test semantic search capabilities
     print("\nTesting Semantic Search Capabilities:")
@@ -53,7 +54,7 @@ async def test_rag():
     for i, query in enumerate(queries):
         try:
             # Test search functionality
-            search_results = await rag.search(query)
+            search_results = rag.query_documents(query)
             print(f"\nQuery {i}: {query}")
             print("Search Results:")
             if search_results:
@@ -64,15 +65,17 @@ async def test_rag():
             else:
                 print("No results found")
 
-            # Test context generation
-            context, citations = await rag.get_context(query)
+            # Format context and citations
+            context = "\n".join([doc["content"] for doc in search_results])
+            citations = [{"content": doc["content"], "metadata": doc["metadata"]} for doc in search_results]
+
             print("\nGenerated Context:")
             print(context)
 
             # Verify citations
             if citations:
                 print("\nCitations:")
-                print(citations)  # Citations are now returned as a formatted string
+                print(citations)
             else:
                 print("\nNo citations found")
 
