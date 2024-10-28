@@ -27,38 +27,92 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket):
         try:
-            # Accept the WebSocket connection immediately without validation
             await websocket.accept()
+            print("WebSocket connection accepted")
             self.active_connections.append(websocket)
             session_id = str(uuid.uuid4())
             self.session_ids[websocket] = session_id
 
-            # Connect to OpenAI's WebSocket using server-side API key
-            openai_ws = await websockets.connect(
-                'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
-                extra_headers={
-                    'Authorization': f'Bearer {settings.OPENAI_API_KEY}',
-                    'Content-Type': 'application/json',
-                    'OpenAI-Beta': 'realtime=v1'
-                }
-            )
-            self.openai_ws_connections[websocket] = openai_ws
+            try:
+                message = await websocket.receive_text()
+                print(f"Received message from client: {message}")
+                message_data = json.loads(message)
 
-            # Send initial configuration
-            await openai_ws.send(json.dumps({
-                "type": "configure",
-                "model": "gpt-4o-realtime-preview-2024-10-01",
-                "metadata": {
-                    "user_id": "default",
-                    "session_id": session_id
-                },
-                "modalities": ["text", "audio"],
-                "voice": "alloy",
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "temperature": 0.8,
-                "max_response_output_tokens": 4096
-            }))
+                if message_data.get("type") != "session.create":
+                    print(f"Unexpected message type: {message_data.get('type')}")
+                    raise ValueError("Expected session.create message")
+
+                print(f"Processing session.create message")
+
+                # Connect to OpenAI's WebSocket with updated configuration
+                openai_ws = await websockets.connect(
+                    'wss://api.openai.com/v1/realtime',
+                    extra_headers={
+                        'Authorization': f'Bearer {settings.OPENAI_API_KEY}',
+                        'OpenAI-Beta': 'realtime=v1'
+                    }
+                )
+                print("Connected to OpenAI WebSocket")
+                self.openai_ws_connections[websocket] = openai_ws
+
+                # Updated configuration message for OpenAI
+                config_message = {
+                    "type": "configure",
+                    "model": "gpt-4o-realtime-preview-2024-10-01",
+                    "metadata": {
+                        "user_id": "default",
+                        "session_id": session_id
+                    },
+                    "modalities": ["text", "audio"],
+                    "voice": "alloy",
+                    "input_audio_format": "pcm16",
+                    "output_audio_format": "pcm16",
+                    "temperature": 0.7,
+                    "max_tokens": 4096
+                }
+                await openai_ws.send(json.dumps(config_message))
+                print("Sent configuration to OpenAI")
+
+                # Wait for OpenAI's response with timeout
+                try:
+                    response = await asyncio.wait_for(openai_ws.recv(), timeout=5.0)
+                    print(f"Received OpenAI response: {response}")
+                    response_data = json.loads(response)
+
+                    if response_data.get("type") == "error":
+                        error_details = response_data.get("error", {})
+                        raise ValueError(f"OpenAI configuration error: {error_details}")
+
+                    # Send success response to client
+                    await websocket.send_json({
+                        "type": "session.created",
+                        "session_id": session_id,
+                        "status": "success"
+                    })
+                    print(f"Session created successfully: {session_id}")
+
+                except asyncio.TimeoutError:
+                    raise ValueError("OpenAI configuration timeout")
+
+            except json.JSONDecodeError as e:
+                print(f"Invalid JSON in message: {str(e)}")
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "Invalid message format",
+                    "details": str(e)
+                })
+                await websocket.close(code=1003)
+                return
+            except Exception as e:
+                print(f"Error during session creation: {str(e)}")
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "Session creation failed",
+                    "details": str(e)
+                })
+                await websocket.close(code=1011)
+                return
+
         except Exception as e:
             print(f"Error in connect: {str(e)}")
             if websocket in self.active_connections:
@@ -104,28 +158,21 @@ class ConnectionManager:
                     # Format message for Realtime API
                     openai_ws = self.openai_ws_connections[websocket]
 
-                    # Send audio buffer append event with base64 encoded audio
+                    # Send audio data with updated format
                     await openai_ws.send(json.dumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(audio_data).decode('utf-8')
+                        "type": "audio",
+                        "audio": base64.b64encode(audio_data).decode('utf-8'),
+                        "format": "webm"
                     }))
 
-                    # Send audio buffer flush event
+                    # Send context and query
                     await openai_ws.send(json.dumps({
-                        "type": "input_audio_buffer.flush"
+                        "type": "message",
+                        "content": f"Context: {context}\nUser Query: {text}",
+                        "role": "user"
                     }))
 
-                    # Send response creation event with context
-                    await openai_ws.send(json.dumps({
-                        "type": "response.create",
-                        "response": {
-                            "modalities": ["text", "audio"],
-                            "instructions": f"Context: {context}\nUser Query: {text}",
-                            "voice": "alloy"
-                        }
-                    }))
-
-                    # Send transcription and citations to client for reference
+                    # Send transcription and citations to client
                     await self.send_message({
                         "type": "transcription",
                         "content": text,
@@ -172,19 +219,36 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # Receive binary audio data
-            data = await websocket.receive_bytes()
-
+            # Receive message from client
             try:
-                # Forward audio data to OpenAI WebSocket
-                await manager.forward_audio(data, websocket)
+                message = await websocket.receive()
+                if message["type"] == "websocket.receive":
+                    if "bytes" in message:
+                        # Handle binary audio data
+                        data = message["bytes"]
+                        await manager.forward_audio(data, websocket)
+                    elif "text" in message:
+                        # Handle text messages (like session.create)
+                        text_data = json.loads(message["text"])
+                        if text_data.get("type") == "session.create":
+                            # Session creation is handled in manager.connect
+                            continue
+                        else:
+                            print(f"Received text message: {text_data}")
 
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {str(e)}")
+                await manager.send_message({
+                    "type": "error",
+                    "content": "Invalid JSON message format",
+                    "status": "error"
+                }, websocket)
             except Exception as e:
                 # Handle general errors
                 print(f"Unexpected WebSocket error: {str(e)}")
                 await manager.send_message({
                     "type": "error",
-                    "content": "An unexpected error occurred while processing audio",
+                    "content": "An unexpected error occurred while processing message",
                     "status": "error"
                 }, websocket)
 
