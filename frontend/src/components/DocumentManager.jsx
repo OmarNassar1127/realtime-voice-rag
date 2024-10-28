@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Box,
   Button,
@@ -18,6 +18,29 @@ const DocumentManager = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const toast = useToast();
+
+  const fetchDocuments = useCallback(async () => {
+    try {
+      const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/documents/list`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch documents');
+      }
+      const data = await response.json();
+      setDocuments(data.files.map(name => ({ id: name, name })));
+    } catch (error) {
+      console.error('Fetch error:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch documents',
+        status: 'error',
+        duration: 3000,
+      });
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    fetchDocuments();
+  }, [fetchDocuments]);
 
   const handleFileUpload = useCallback(async (event) => {
     const files = Array.from(event.target.files);
@@ -39,8 +62,8 @@ const DocumentManager = () => {
         }
 
         const result = await response.json();
-        setDocuments(prev => [...prev, { id: result.id, name: file.name }]);
-        
+        setDocuments(prev => [...prev, { id: result.filename, name: file.name }]);
+
         toast({
           title: 'Upload Successful',
           description: `${file.name} has been uploaded`,
@@ -62,7 +85,8 @@ const DocumentManager = () => {
 
     setIsUploading(false);
     setUploadProgress(0);
-  }, [toast]);
+    fetchDocuments(); // Refresh the document list after upload
+  }, [toast, fetchDocuments]);
 
   const handleDelete = async (docId, docName) => {
     try {
@@ -75,7 +99,7 @@ const DocumentManager = () => {
       }
 
       setDocuments(prev => prev.filter(doc => doc.id !== docId));
-      
+
       toast({
         title: 'Document Deleted',
         description: `${docName} has been removed`,

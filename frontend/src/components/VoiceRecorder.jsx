@@ -25,12 +25,14 @@ const VoiceRecorder = () => {
   const audioContext = useRef(null)
   const audioQueue = useRef([])
   const isPlaying = useRef(false)
+  const sessionCreated = useRef(false)
   const toast = useToast()
+
   const { sendMessage, lastMessage, readyState } = useWebSocket(WEBSOCKET_URL, {
+    protocols: ['realtime'],
     onOpen: () => {
-      console.log('WebSocket Connected')
-      // Don't send session.create immediately - wait for stable connection
-      setTimeout(() => {
+      // Send session.create with correct format
+      if (!sessionCreated.current) {
         try {
           console.log('Sending session.create message')
           sendMessage(JSON.stringify({
@@ -39,8 +41,13 @@ const VoiceRecorder = () => {
               model: 'gpt-4o-realtime-preview-2024-10-01',
               modalities: ['text', 'audio'],
               voice: 'alloy',
-              input_audio_format: 'pcm16',
-              output_audio_format: 'pcm16'
+              input_audio_format: {
+                type: 'pcm16',
+                sampling_rate: 24000,
+                channels: 1,
+                endianness: 'little'
+              },
+              stream: true
             }
           }))
         } catch (error) {
@@ -53,7 +60,7 @@ const VoiceRecorder = () => {
             isClosable: true,
           })
         }
-      }, 1000) // Give connection time to stabilize
+      }
     },
     onError: (error) => {
       console.error('WebSocket error:', error)
@@ -64,10 +71,11 @@ const VoiceRecorder = () => {
         duration: 3000,
         isClosable: true,
       })
+      sessionCreated.current = false
     },
     onClose: (event) => {
       console.log('WebSocket closed:', event)
-      // Only show toast if it wasn't a normal closure
+      sessionCreated.current = false
       if (event.code !== 1000) {
         toast({
           title: 'Connection Closed',
@@ -78,16 +86,11 @@ const VoiceRecorder = () => {
         })
       }
     },
-    shouldReconnect: (closeEvent) => closeEvent.code !== 1000 && closeEvent.code !== 1005, // Don't reconnect on normal closure
+    shouldReconnect: (closeEvent) => true,
     reconnectInterval: (lastAttemptNumber) => Math.min(1000 * Math.pow(2, lastAttemptNumber), 30000),
     reconnectAttempts: 10,
-    share: false, // Don't share connections
-    retryOnError: true,
-    options: {
-      headers: {
-        'OpenAI-Beta': 'realtime=v1'
-      }
-    }
+    share: false,
+    retryOnError: true
   })
 
   useEffect(() => {
@@ -98,6 +101,7 @@ const VoiceRecorder = () => {
 
         if (response.type === 'session.created') {
           console.log('Session created successfully')
+          sessionCreated.current = true
           toast({
             title: 'Connected',
             description: 'Session established successfully',
@@ -112,21 +116,19 @@ const VoiceRecorder = () => {
           console.error('Server error:', response.error)
           toast({
             title: 'Server Error',
-            description: response.error?.message || response.content,
+            description: response.details || response.error,
             status: 'error',
             duration: 3000,
           })
           return
         }
 
-        if (response.type === 'audio_data') {
-          // Convert base64 audio to ArrayBuffer
+        if (response.type === 'audio') {
           const audioData = atob(response.audio)
           const audioArray = new Uint8Array(audioData.length)
           for (let i = 0; i < audioData.length; i++) {
             audioArray[i] = audioData.charCodeAt(i)
           }
-          // Queue audio for playback
           audioQueue.current.push(audioArray.buffer)
           if (!isPlaying.current) {
             playNextAudio()
@@ -134,19 +136,14 @@ const VoiceRecorder = () => {
         }
 
         if (response.type === 'text') {
-          // Update transcript with text response
-          setTranscript(prev => prev + '\n' + response.text)
+          setTranscript(prev => prev + (prev ? '\n' : '') + response.content)
         }
 
         if (response.citations) {
-          setCitations(response.citations.map(citation => ({
-            text: citation.text,
-            source: citation.source,
-            score: citation.score
-          })))
+          setCitations(response.citations)
         }
 
-        if (response.type === 'response.end') {
+        if (response.type === 'response.completed') {
           setIsProcessing(false)
           console.log('Response completed')
         }
@@ -165,7 +162,9 @@ const VoiceRecorder = () => {
 
   const playNextAudio = async () => {
     if (!audioContext.current) {
-      audioContext.current = new (window.AudioContext || window.webkitAudioContext)()
+      audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 24000
+      })
     }
 
     isPlaying.current = true
@@ -192,7 +191,28 @@ const VoiceRecorder = () => {
   }
 
   const startRecording = async () => {
+    if (!sessionCreated.current) {
+      toast({
+        title: 'Connection Error',
+        description: 'Waiting for session to be established',
+        status: 'warning',
+        duration: 3000,
+      })
+      return
+    }
+
     try {
+      // Check if browser supports getUserMedia
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Your browser does not support audio recording')
+      }
+
+      // Request microphone permissions
+      const permissionResult = await navigator.permissions.query({ name: 'microphone' })
+      if (permissionResult.state === 'denied') {
+        throw new Error('Microphone permission denied. Please enable microphone access in your browser settings.')
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 24000,
@@ -209,21 +229,19 @@ const VoiceRecorder = () => {
       processor.connect(audioCtx.destination)
 
       processor.onaudioprocess = (e) => {
-        if (readyState === 1) {
+        if (readyState === 1 && sessionCreated.current) {
           const inputData = e.inputBuffer.getChannelData(0)
           const pcmData = convertToPCM16(inputData)
-          // Convert PCM data to base64
           const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
 
-          // Send audio data in OpenAI Realtime API format
           sendMessage(JSON.stringify({
-            type: 'input_audio_buffer.append',
-            audio: base64Audio
-          }))
-
-          // Commit the audio buffer after sending
-          sendMessage(JSON.stringify({
-            type: 'input_audio_buffer.commit'
+            type: 'audio',
+            audio: base64Audio,
+            format: {
+              type: 'pcm16',
+              sampling_rate: 24000,
+              channels: 1
+            }
           }))
         }
       }
@@ -231,12 +249,14 @@ const VoiceRecorder = () => {
       setIsRecording(true)
       setIsProcessing(true)
       setCitations([])
+      setTranscript('')
     } catch (error) {
+      console.error('Microphone access error:', error)
       toast({
-        title: 'Error',
-        description: 'Could not access microphone',
+        title: 'Microphone Error',
+        description: error.message || 'Could not access microphone',
         status: 'error',
-        duration: 3000,
+        duration: 5000,
       })
     }
   }
@@ -250,7 +270,7 @@ const VoiceRecorder = () => {
       setIsRecording(false)
 
       // Send commit message
-      sendMessage(JSON.stringify({ type: 'input_audio_buffer.commit' }))
+      sendMessage(JSON.stringify({ type: 'audio.commit' }))
     }
   }, [mediaRecorder, isRecording, sendMessage])
 
@@ -281,16 +301,21 @@ const VoiceRecorder = () => {
         {isProcessing && !isRecording && <Text>Processing response...</Text>}
         {readyState !== 1 && <Text color="red">Connecting to server...</Text>}
       </HStack>
+      {transcript && (
+        <Box mt={4} p={4} borderWidth="1px" borderRadius="lg">
+          <Text fontWeight="bold" mb={2}>Transcript:</Text>
+          <Text>{transcript}</Text>
+        </Box>
+      )}
       {citations && citations.length > 0 && (
         <Box mt={4} p={4} borderWidth="1px" borderRadius="lg">
           <Text fontWeight="bold" mb={2}>Sources Used:</Text>
           <VStack align="stretch" spacing={2}>
             {citations.map((citation, index) => (
               <Box key={index} p={2} bg="gray.50" borderRadius="md">
-                <Text fontSize="sm">{citation.text}</Text>
+                <Text fontSize="sm">{citation.content}</Text>
                 <Text fontSize="xs" color="gray.600">
-                  Source: {citation.source}
-                  {citation.score && ` (Relevance: ${Math.round(citation.score * 100)}%)`}
+                  Source: {citation.metadata.source}
                 </Text>
               </Box>
             ))}
