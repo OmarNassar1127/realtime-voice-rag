@@ -6,7 +6,7 @@ authors = ["Devin"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.11"
 fastapi = {extras = ["standard"], version = "^0.115.3"}
 uvicorn = {extras = ["standard"], version = "^0.32.0"}
 python-multipart = "^0.0.16"

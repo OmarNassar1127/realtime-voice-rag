@@ -1496,7 +1496,10 @@ aiohttp = ">=3.8.3,<4.0.0"
 langchain-core = ">=0.3.12,<0.4.0"
 langchain-text-splitters = ">=0.3.0,<0.4.0"
 langsmith = ">=0.1.17,<0.2.0"
-numpy = {version = ">=1.26.0,<2.0.0", markers = "python_version >= \"3.12\""}
+numpy = [
+    {version = ">=1,<2", markers = "python_version < \"3.12\""},
+    {version = ">=1.26.0,<2.0.0", markers = "python_version >= \"3.12\""},
+]
 pydantic = ">=2.7.4,<3.0.0"
 PyYAML = ">=5.3"
 requests = ">=2,<3"
@@ -1520,7 +1523,10 @@ dataclasses-json = ">=0.5.7,<0.7"
 langchain = ">=0.3.4,<0.4.0"
 langchain-core = ">=0.3.12,<0.4.0"
 langsmith = ">=0.1.125,<0.2.0"
-numpy = {version = ">=1.26.0,<2.0.0", markers = "python_version >= \"3.12\""}
+numpy = [
+    {version = ">=1,<2", markers = "python_version < \"3.12\""},
+    {version = ">=1.26.0,<2.0.0", markers = "python_version >= \"3.12\""},
+]
 pydantic-settings = ">=2.4.0,<3.0.0"
 PyYAML = ">=5.3"
 requests = ">=2,<3"
@@ -4882,5 +4888,5 @@ type = ["pytest-mypy"]
 
 [metadata]
 lock-version = "2.0"
-python-versions = "^3.12"
-content-hash = "2efaa1f273ffce21c7efd8aa4493e434c3d74ca20c3ab80fcd0f5c2e044eed34"
+python-versions = "^3.11"
+content-hash = "bd6209797e58cc4744e5e655f3f02c83e2353a3e66c66d5dd4ce277e23a799d2"
