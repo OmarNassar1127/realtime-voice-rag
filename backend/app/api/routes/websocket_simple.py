@@ -34,7 +34,7 @@ class ConnectionManager:
             self.active_connections.append(websocket)
             logger.info("New WebSocket connection accepted with realtime protocol")
 
-            # Connect to OpenAI WebSocket
+            # Connect to OpenAI WebSocket and initialize session
             try:
                 logger.info(f"Connecting to OpenAI WebSocket at {OPENAI_WS_URL}")
                 openai_websocket = await websockets.connect(
@@ -48,7 +48,31 @@ class ConnectionManager:
                 self.openai_connections[websocket] = openai_websocket
                 logger.info("OpenAI WebSocket connection established")
 
-                # Send initial connection success message
+                # Initialize session with OpenAI
+                session_init = {
+                    "type": "response.create",
+                    "session": {
+                        "model": "gpt-4o-realtime-preview-2024-10-01",
+                        "modalities": ["text", "audio"],
+                        "voice": "alloy",
+                        "input_audio_format": {
+                            "type": "pcm16",
+                            "sampling_rate": 24000,
+                            "channels": 1,
+                            "endianness": "little"
+                        },
+                        "stream": True
+                    }
+                }
+
+                await openai_websocket.send(json.dumps(session_init))
+                response = await openai_websocket.recv()
+                response_data = json.loads(response)
+
+                if response_data.get("type") == "error":
+                    raise Exception(f"Failed to initialize session: {response_data}")
+
+                logger.info("Session initialized successfully")
                 await websocket.send_json({
                     "type": "connection_established",
                     "message": "WebSocket connections established successfully",
@@ -105,50 +129,23 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"Processing message type: {message_type}")
 
                     # Handle different message types
-                    if message_type == "session.create":
-                        logger.info("Handling session creation request")
-                        formatted_message = {
-                            "type": "session.create",
-                            "session": {
-                                "model": "gpt-4o-realtime-preview-2024-10-01",
-                                "modalities": ["text", "audio"],
-                                "voice": "alloy",
-                                "input_audio_format": {
-                                    "type": "pcm16",
-                                    "sampling_rate": 24000,
-                                    "channels": 1,
-                                    "endianness": "little"
-                                },
-                                "stream": True
-                            }
-                        }
-
-                        # Forward formatted session creation to OpenAI
-                        if websocket in manager.openai_connections:
-                            logger.info("Sending session creation to OpenAI")
-                            await manager.openai_connections[websocket].send(json.dumps(formatted_message))
-                            response = await manager.openai_connections[websocket].recv()
-                            response_data = json.loads(response)
-                            logger.info(f"Received OpenAI response: {response_data}")
-
-                            if response_data.get("type") == "error":
-                                logger.error(f"OpenAI session creation failed: {response_data}")
-                                await websocket.send_json({
-                                    "type": "error",
-                                    "error": "Session creation failed",
-                                    "details": response_data
-                                })
-                            else:
-                                logger.info("Session created successfully")
-                                await websocket.send_text(response)
-                    elif message_type == "ping":
+                    if message_type == "ping":
                         await websocket.send_json({"type": "pong"})
-                    else:
-                        # Forward message to OpenAI
+                    elif message_type in ["input_audio_buffer.append", "response.create"]:
+                        # Forward audio data or response creation request to OpenAI
                         if websocket in manager.openai_connections:
                             await manager.openai_connections[websocket].send(data)
-                            response = await manager.openai_connections[websocket].recv()
-                            await websocket.send_text(response)
+                            # Start receiving responses
+                            while True:
+                                response = await manager.openai_connections[websocket].recv()
+                                response_data = json.loads(response)
+
+                                # Forward response to client
+                                await websocket.send_text(response)
+
+                                # Break if response is complete
+                                if response_data.get("type") == "response.completed":
+                                    break
 
                 except json.JSONDecodeError:
                     logger.warning("Received invalid JSON message")
