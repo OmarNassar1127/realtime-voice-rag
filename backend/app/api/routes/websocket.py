@@ -26,37 +26,44 @@ class ConnectionManager:
         self.session_ids: Dict[WebSocket, str] = {}
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        session_id = str(uuid.uuid4())
-        self.session_ids[websocket] = session_id
+        try:
+            # Accept the WebSocket connection immediately without validation
+            await websocket.accept()
+            self.active_connections.append(websocket)
+            session_id = str(uuid.uuid4())
+            self.session_ids[websocket] = session_id
 
-        # Connect to OpenAI's WebSocket
-        openai_ws = await websockets.connect(
-            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
-            extra_headers={
-                'Authorization': f'Bearer {settings.OPENAI_API_KEY}',
-                'Content-Type': 'application/json',
-                'OpenAI-Beta': 'realtime=v1'
-            }
-        )
-        self.openai_ws_connections[websocket] = openai_ws
+            # Connect to OpenAI's WebSocket using server-side API key
+            openai_ws = await websockets.connect(
+                'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
+                extra_headers={
+                    'Authorization': f'Bearer {settings.OPENAI_API_KEY}',
+                    'Content-Type': 'application/json',
+                    'OpenAI-Beta': 'realtime=v1'
+                }
+            )
+            self.openai_ws_connections[websocket] = openai_ws
 
-        # Send initial configuration
-        await openai_ws.send(json.dumps({
-            "type": "configure",
-            "model": "gpt-4o-realtime-preview-2024-10-01",
-            "metadata": {
-                "user_id": "default",
-                "session_id": session_id
-            },
-            "modalities": ["text", "audio"],
-            "voice": "alloy",
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "temperature": 0.8,
-            "max_response_output_tokens": 4096
-        }))
+            # Send initial configuration
+            await openai_ws.send(json.dumps({
+                "type": "configure",
+                "model": "gpt-4o-realtime-preview-2024-10-01",
+                "metadata": {
+                    "user_id": "default",
+                    "session_id": session_id
+                },
+                "modalities": ["text", "audio"],
+                "voice": "alloy",
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "temperature": 0.8,
+                "max_response_output_tokens": 4096
+            }))
+        except Exception as e:
+            print(f"Error in connect: {str(e)}")
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+            raise
 
     async def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
