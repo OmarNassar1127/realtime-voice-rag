@@ -2,6 +2,7 @@ import { ChakraProvider, Container, VStack, Heading, Box, Divider, Text } from '
 import VoiceRecorder from './components/VoiceRecorder'
 import DocumentManager from './components/DocumentManager'
 import ChatInterface from './components/ChatInterface'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function App() {
   return (
@@ -16,7 +17,9 @@ function App() {
               <DocumentManager />
               <Divider />
               <Text fontSize="lg" fontWeight="medium">Voice Interface</Text>
-              <VoiceRecorder />
+              <ErrorBoundary>
+                <VoiceRecorder />
+              </ErrorBoundary>
             </VStack>
           </Box>
 

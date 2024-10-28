@@ -1,10 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Button, HStack, Text, useToast, Box, VStack } from '@chakra-ui/react'
+import { Button, HStack, Text, useToast, Box, VStack, Input } from '@chakra-ui/react'
 import { FaMicrophone, FaStop } from 'react-icons/fa'
 import useWebSocket from 'react-use-websocket'
 
 // Hardcoded WebSocket URL as per documentation
-const WEBSOCKET_URL = 'ws://localhost:8000/ws'
+const WEBSOCKET_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000/ws`
 
 // Function to convert audio buffer to PCM 16-bit
 const convertToPCM16 = (audioBuffer) => {
@@ -22,6 +22,8 @@ const VoiceRecorder = () => {
   const [citations, setCitations] = useState([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [transcript, setTranscript] = useState('')
+  const [isTextMode, setIsTextMode] = useState(false)
+  const [textInput, setTextInput] = useState('')
   const audioContext = useRef(null)
   const audioQueue = useRef([])
   const isPlaying = useRef(false)
@@ -43,32 +45,37 @@ const VoiceRecorder = () => {
       console.error('WebSocket error:', error)
       toast({
         title: 'WebSocket Error',
-        description: 'Connection error occurred. Please try again.',
+        description: error.message || 'Connection error occurred. Please try again.',
         status: 'error',
         duration: 3000,
         isClosable: true,
       })
+      if (mediaRecorder) {
+        stopRecording()
+      }
     },
     onClose: (event) => {
       console.log('WebSocket closed:', event)
       if (event.code !== 1000) {
         toast({
           title: 'Connection Closed',
-          description: `Connection closed unexpectedly. Please refresh the page.`,
+          description: event.reason || 'Connection closed unexpectedly. Please refresh the page.',
           status: 'warning',
           duration: 3000,
           isClosable: true,
         })
+        if (mediaRecorder) {
+          stopRecording()
+        }
       }
     },
-    shouldReconnect: (closeEvent) => closeEvent.code !== 1000,
-    reconnectInterval: 3000,
+    shouldReconnect: (closeEvent) => closeEvent.code !== 1000 && closeEvent.code !== 3000,
+    reconnectInterval: (attemptNumber) => Math.min(1000 * Math.pow(2, attemptNumber), 10000),
     reconnectAttempts: 5,
     share: false,
     retryOnError: true
   })
 
-javascript
   useEffect(() => {
     if (lastMessage) {
       try {
@@ -82,10 +89,13 @@ javascript
 
         if (response.type === 'error') {
           setIsProcessing(false)
-          console.error('Server error:', response.error)
+          console.error('Server error:', JSON.stringify(response, null, 2))
+          const errorDescription = response.error ?
+            `${response.error.message || response.error.code || 'Unknown error'}` :
+            'An error occurred'
           toast({
             title: 'Server Error',
-            description: response.error?.message || 'An error occurred',
+            description: errorDescription,
             status: 'error',
             duration: 3000,
             isClosable: true
@@ -94,7 +104,6 @@ javascript
         }
 
         if (response.type === 'audio') {
-          // Handle incoming audio from AI response
           const audioData = atob(response.audio)
           const audioArray = new Uint8Array(audioData.length)
           for (let i = 0; i < audioData.length; i++) {
@@ -106,14 +115,12 @@ javascript
           }
         }
 
-        if (response.type === 'text') {
+        if (response.type === 'conversation.item.create' || response.type === 'response.create') {
           setTranscript(prev => prev + (prev ? '\n' : '') + response.content)
         }
 
         if (response.type === 'response.completed') {
           setIsProcessing(false)
-          console.log('Response completed')
-          // Reset for next interaction
           if (response.citations) {
             setCitations(response.citations)
           }
@@ -133,6 +140,7 @@ javascript
       }
     }
   }, [lastMessage, toast])
+
   const playNextAudio = async () => {
     if (!audioContext.current) {
       audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
@@ -163,7 +171,6 @@ javascript
     isPlaying.current = false
   }
 
-javascript
   const startRecording = async () => {
     if (readyState !== 1) {
       toast({
@@ -177,15 +184,16 @@ javascript
     }
 
     try {
-      // Check if browser supports getUserMedia
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Your browser does not support audio recording')
-      }
-
-      // Request microphone permissions
-      const permissionResult = await navigator.permissions.query({ name: 'microphone' })
-      if (permissionResult.state === 'denied') {
-        throw new Error('Microphone permission denied. Please enable microphone access in your browser settings.')
+        setIsTextMode(true)
+        toast({
+          title: 'Device Error',
+          description: 'Microphone access is not available in this environment. Using text input instead.',
+          status: 'info',
+          duration: 5000,
+          isClosable: true
+        })
+        return
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -193,7 +201,17 @@ javascript
           sampleRate: 24000,
           channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      }).catch(error => {
+        setIsTextMode(true)
+        if (error.name === 'NotAllowedError') {
+          throw new Error('Microphone permission denied. Please allow microphone access and try again.')
+        } else if (error.name === 'NotFoundError') {
+          throw new Error('No microphone found. Please connect a microphone and try again.')
+        } else {
+          throw new Error('Microphone error: ' + error.message)
         }
       })
 
@@ -209,27 +227,32 @@ javascript
           const pcmData = convertToPCM16(inputData)
           const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
 
-          try {
-            sendMessage(JSON.stringify({
-              type: 'input_audio_buffer.append',
-              audio: base64Audio,
-              format: {
-                type: 'pcm16',
-                sampling_rate: 24000,
-                channels: 1,
-                endianness: 'little'
-              }
-            }))
-          } catch (error) {
-            console.error('Error sending audio data:', error)
-          }
+          sendMessage(JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: base64Audio,
+            format: {
+              type: 'pcm16',
+              sampling_rate: 24000,
+              channels: 1,
+              endianness: 'little'
+            }
+          }))
         }
       }
+
       setMediaRecorder({ stream, audioCtx, processor, source })
       setIsRecording(true)
       setIsProcessing(true)
       setCitations([])
       setTranscript('')
+
+      toast({
+        title: 'Recording Started',
+        description: 'Microphone is now active and recording',
+        status: 'success',
+        duration: 3000,
+        isClosable: true
+      })
     } catch (error) {
       console.error('Microphone access error:', error)
       toast({
@@ -239,6 +262,7 @@ javascript
         duration: 5000,
         isClosable: true
       })
+      setIsTextMode(true)
     }
   }
 
@@ -251,14 +275,19 @@ javascript
         mediaRecorder.audioCtx.close()
         setIsRecording(false)
 
-        // Request AI response with audio
-        sendMessage(JSON.stringify({
-          type: 'response.create',
-          options: {
-            temperature: 0.7,
-            response_format: { type: 'text_and_audio' }
+        const message = {
+          type: 'conversation.item.create',
+          item: {
+            type: 'text',
+            content: transcript || 'Audio input received',
+            role: 'user',
+            response_format: {
+              type: 'text_and_audio',
+              voice: 'alloy'
+            }
           }
-        }))
+        }
+        sendMessage(JSON.stringify(message))
       } catch (error) {
         console.error('Error stopping recording:', error)
         toast({
@@ -270,9 +299,8 @@ javascript
         })
       }
     }
-  }, [mediaRecorder, isRecording, sendMessage])
+  }, [mediaRecorder, isRecording, sendMessage, transcript])
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (mediaRecorder) {
@@ -284,17 +312,58 @@ javascript
     }
   }, [mediaRecorder, stopRecording])
 
+  const handleTextSubmit = () => {
+    if (!textInput.trim() || readyState !== 1) return
+
+    setIsProcessing(true)
+    setCitations([])
+    setTranscript('')
+
+    const message = {
+      type: 'conversation.item.create',
+      item: {
+        type: 'text',
+        content: textInput,
+        role: 'user',
+        response_format: {
+          type: 'text_and_audio',
+          voice: 'alloy'
+        }
+      }
+    }
+    sendMessage(JSON.stringify(message))
+    setTextInput('')
+  }
   return (
     <Box>
       <HStack spacing={4}>
-        <Button
-          leftIcon={isRecording ? <FaStop /> : <FaMicrophone />}
-          colorScheme={isRecording ? 'red' : 'blue'}
-          onClick={isRecording ? stopRecording : startRecording}
-          isDisabled={readyState !== 1 || isProcessing}
-        >
-          {isRecording ? 'Stop Recording' : 'Start Recording'}
-        </Button>
+        {!isTextMode && (
+          <Button
+            leftIcon={isRecording ? <FaStop /> : <FaMicrophone />}
+            colorScheme={isRecording ? 'red' : 'blue'}
+            onClick={isRecording ? stopRecording : startRecording}
+            isDisabled={readyState !== 1 || isProcessing}
+          >
+            {isRecording ? 'Stop Recording' : 'Start Recording'}
+          </Button>
+        )}
+        {isTextMode && (
+          <HStack>
+            <Input
+              placeholder="Type your message..."
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleTextSubmit()}
+            />
+            <Button
+              colorScheme="blue"
+              onClick={handleTextSubmit}
+              isDisabled={readyState !== 1 || isProcessing || !textInput.trim()}
+            >
+              Send
+            </Button>
+          </HStack>
+        )}
         {isRecording && <Text>Recording in progress...</Text>}
         {isProcessing && !isRecording && <Text>Processing response...</Text>}
         {readyState !== 1 && <Text color="red">Connecting to server...</Text>}
