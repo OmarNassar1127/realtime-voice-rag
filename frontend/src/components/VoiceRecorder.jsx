@@ -25,89 +25,58 @@ const VoiceRecorder = () => {
   const audioContext = useRef(null)
   const audioQueue = useRef([])
   const isPlaying = useRef(false)
-  const sessionCreated = useRef(false)
   const toast = useToast()
 
   const { sendMessage, lastMessage, readyState } = useWebSocket(WEBSOCKET_URL, {
     protocols: ['realtime'],
     onOpen: () => {
-      // Send session.create with correct format
-      if (!sessionCreated.current) {
-        try {
-          console.log('Sending session.create message')
-          sendMessage(JSON.stringify({
-            type: 'session.create',
-            session: {
-              model: 'gpt-4o-realtime-preview-2024-10-01',
-              modalities: ['text', 'audio'],
-              voice: 'alloy',
-              input_audio_format: {
-                type: 'pcm16',
-                sampling_rate: 24000,
-                channels: 1,
-                endianness: 'little'
-              },
-              stream: true
-            }
-          }))
-        } catch (error) {
-          console.error('Error sending session create message:', error)
-          toast({
-            title: 'Connection Error',
-            description: 'Failed to initialize session',
-            status: 'error',
-            duration: 3000,
-            isClosable: true,
-          })
-        }
-      }
+      console.log('WebSocket connection established')
+      toast({
+        title: 'Connected',
+        description: 'Ready to start recording',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      })
     },
     onError: (error) => {
       console.error('WebSocket error:', error)
       toast({
         title: 'WebSocket Error',
-        description: 'Connection error occurred. Retrying...',
+        description: 'Connection error occurred. Please try again.',
         status: 'error',
         duration: 3000,
         isClosable: true,
       })
-      sessionCreated.current = false
     },
     onClose: (event) => {
       console.log('WebSocket closed:', event)
-      sessionCreated.current = false
       if (event.code !== 1000) {
         toast({
           title: 'Connection Closed',
-          description: `Connection closed (${event.code}). ${event.code === 1006 ? 'Abnormal closure' : event.reason}`,
+          description: `Connection closed unexpectedly. Please refresh the page.`,
           status: 'warning',
           duration: 3000,
           isClosable: true,
         })
       }
     },
-    shouldReconnect: (closeEvent) => true,
-    reconnectInterval: (lastAttemptNumber) => Math.min(1000 * Math.pow(2, lastAttemptNumber), 30000),
-    reconnectAttempts: 10,
+    shouldReconnect: (closeEvent) => closeEvent.code !== 1000,
+    reconnectInterval: 3000,
+    reconnectAttempts: 5,
     share: false,
     retryOnError: true
   })
 
+javascript
   useEffect(() => {
     if (lastMessage) {
       try {
         const response = JSON.parse(lastMessage.data)
         console.log('Received WebSocket message:', response)
 
-        if (response.type === 'session.created') {
-          console.log('Session created successfully')
-          sessionCreated.current = true
-          toast({
-            title: 'Connected',
-            description: 'Session established successfully',
-            status: 'success',
-            duration: 3000,
-          })
+        if (response.type === 'connection_established') {
+          console.log('Connection established successfully')
           return
         }
 
@@ -116,14 +85,16 @@ const VoiceRecorder = () => {
           console.error('Server error:', response.error)
           toast({
             title: 'Server Error',
-            description: response.details || response.error,
+            description: response.error?.message || 'An error occurred',
             status: 'error',
             duration: 3000,
+            isClosable: true
           })
           return
         }
 
         if (response.type === 'audio') {
+          // Handle incoming audio from AI response
           const audioData = atob(response.audio)
           const audioArray = new Uint8Array(audioData.length)
           for (let i = 0; i < audioData.length; i++) {
@@ -139,27 +110,29 @@ const VoiceRecorder = () => {
           setTranscript(prev => prev + (prev ? '\n' : '') + response.content)
         }
 
-        if (response.citations) {
-          setCitations(response.citations)
-        }
-
         if (response.type === 'response.completed') {
           setIsProcessing(false)
           console.log('Response completed')
+          // Reset for next interaction
+          if (response.citations) {
+            setCitations(response.citations)
+          }
+          audioQueue.current = []
+          isPlaying.current = false
         }
       } catch (e) {
-        console.error('Error parsing WebSocket message:', e, lastMessage.data)
+        console.error('Error parsing WebSocket message:', e)
         setIsProcessing(false)
         toast({
           title: 'Message Error',
           description: 'Failed to process server response',
           status: 'error',
           duration: 3000,
+          isClosable: true
         })
       }
     }
   }, [lastMessage, toast])
-
   const playNextAudio = async () => {
     if (!audioContext.current) {
       audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
@@ -190,13 +163,15 @@ const VoiceRecorder = () => {
     isPlaying.current = false
   }
 
+javascript
   const startRecording = async () => {
-    if (!sessionCreated.current) {
+    if (readyState !== 1) {
       toast({
         title: 'Connection Error',
-        description: 'Waiting for session to be established',
+        description: 'Waiting for connection to be established',
         status: 'warning',
         duration: 3000,
+        isClosable: true
       })
       return
     }
@@ -229,20 +204,25 @@ const VoiceRecorder = () => {
       processor.connect(audioCtx.destination)
 
       processor.onaudioprocess = (e) => {
-        if (readyState === 1 && sessionCreated.current) {
+        if (readyState === 1) {
           const inputData = e.inputBuffer.getChannelData(0)
           const pcmData = convertToPCM16(inputData)
           const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
 
-          sendMessage(JSON.stringify({
-            type: 'audio',
-            audio: base64Audio,
-            format: {
-              type: 'pcm16',
-              sampling_rate: 24000,
-              channels: 1
-            }
-          }))
+          try {
+            sendMessage(JSON.stringify({
+              type: 'input_audio_buffer.append',
+              audio: base64Audio,
+              format: {
+                type: 'pcm16',
+                sampling_rate: 24000,
+                channels: 1,
+                endianness: 'little'
+              }
+            }))
+          } catch (error) {
+            console.error('Error sending audio data:', error)
+          }
         }
       }
       setMediaRecorder({ stream, audioCtx, processor, source })
@@ -257,20 +237,38 @@ const VoiceRecorder = () => {
         description: error.message || 'Could not access microphone',
         status: 'error',
         duration: 5000,
+        isClosable: true
       })
     }
   }
 
   const stopRecording = useCallback(() => {
     if (mediaRecorder && isRecording) {
-      mediaRecorder.stream.getTracks().forEach(track => track.stop())
-      mediaRecorder.source.disconnect()
-      mediaRecorder.processor.disconnect()
-      mediaRecorder.audioCtx.close()
-      setIsRecording(false)
+      try {
+        mediaRecorder.stream.getTracks().forEach(track => track.stop())
+        mediaRecorder.source.disconnect()
+        mediaRecorder.processor.disconnect()
+        mediaRecorder.audioCtx.close()
+        setIsRecording(false)
 
-      // Send commit message
-      sendMessage(JSON.stringify({ type: 'audio.commit' }))
+        // Request AI response with audio
+        sendMessage(JSON.stringify({
+          type: 'response.create',
+          options: {
+            temperature: 0.7,
+            response_format: { type: 'text_and_audio' }
+          }
+        }))
+      } catch (error) {
+        console.error('Error stopping recording:', error)
+        toast({
+          title: 'Recording Error',
+          description: 'Failed to stop recording properly',
+          status: 'error',
+          duration: 3000,
+          isClosable: true
+        })
+      }
     }
   }, [mediaRecorder, isRecording, sendMessage])
 
