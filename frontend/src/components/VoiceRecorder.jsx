@@ -9,9 +9,15 @@ const WEBSOCKET_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}
 // Function to convert audio buffer to PCM 16-bit
 const convertToPCM16 = (audioBuffer) => {
   const pcmData = new Int16Array(audioBuffer.length)
+  let maxSample = 0
+  // Find maximum sample for normalization
   for (let i = 0; i < audioBuffer.length; i++) {
-    const s = Math.max(-1, Math.min(1, audioBuffer[i]))
-    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    maxSample = Math.max(maxSample, Math.abs(audioBuffer[i]))
+  }
+  // Scale and convert to 16-bit PCM with normalization
+  const scale = maxSample > 0 ? 32767 / maxSample : 1
+  for (let i = 0; i < audioBuffer.length; i++) {
+    pcmData[i] = Math.round(audioBuffer[i] * scale)
   }
   return pcmData.buffer
 }
@@ -27,6 +33,8 @@ const VoiceRecorder = () => {
   const [sessionId, setSessionId] = useState(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [responseReceived, setResponseReceived] = useState(false)
+  const [audioContextStatus, setAudioContextStatus] = useState('uninitialized')
+  const [microphoneStatus, setMicrophoneStatus] = useState('unchecked')
   const audioContext = useRef(null)
   const audioQueue = useRef([])
   const isPlayingRef = useRef(false)
@@ -87,11 +95,12 @@ const VoiceRecorder = () => {
           const response = JSON.parse(lastMessage.data)
           console.log('Parsed WebSocket message:', response)
 
+          // Handle WebSocket connection establishment
           if (response.type === 'connection_established') {
             console.log('WebSocket connection established successfully')
             console.log('Sending initial session configuration...')
-            // Send initial session configuration
-            sendMessage(JSON.stringify({
+            // Send initial session configuration with retry logic
+            const configMessage = {
               type: 'session.update',
               output_format: {
                 type: 'audio',
@@ -99,33 +108,50 @@ const VoiceRecorder = () => {
                 sample_rate: 24000,
                 channels: 1
               }
-            }))
-            console.log('Initial session configuration sent')
+            }
+            try {
+              sendMessage(JSON.stringify(configMessage))
+              console.log('Initial session configuration sent')
+            } catch (error) {
+              console.error('Failed to send session configuration:', error)
+              // Retry after 1 second
+              setTimeout(() => sendMessage(JSON.stringify(configMessage)), 1000)
+            }
             return
           }
 
-          if (response.type === 'session.created') {
+          // Handle session creation
+          if (response.type === 'session.created' || response.type === 'session.create.ack') {
             const newSessionId = response.session?.id
             if (newSessionId) {
               console.log('New session created, ID:', newSessionId)
               setSessionId(newSessionId)
               console.log('Configuring session for audio output...')
-              // Configure session after creation
-              sendMessage(JSON.stringify({
+              // Configure session with retry logic
+              const configMessage = {
                 type: 'session.update',
+                session: { id: newSessionId },
                 output_format: {
                   type: 'audio',
                   format: 'pcm_16',
                   sample_rate: 24000,
                   channels: 1
                 }
-              }))
-              console.log('Session configuration sent')
+              }
+              try {
+                sendMessage(JSON.stringify(configMessage))
+                console.log('Session configuration sent')
+              } catch (error) {
+                console.error('Failed to send session configuration:', error)
+                setTimeout(() => sendMessage(JSON.stringify(configMessage)), 1000)
+              }
             } else {
               console.warn('Session created but no ID received')
             }
             return
           }
+
+          // Handle audio responses
           if (response.type === 'response.create' || response.type === 'response.chunk') {
             console.log('Received AI response:', JSON.stringify(response, null, 2))
             setResponseReceived(true)
@@ -137,12 +163,18 @@ const VoiceRecorder = () => {
                 if (item.type === 'audio' && item.data) {
                   console.log('Processing audio content. Data length:', item.data.length)
                   try {
-                    // Decode and play audio data
+                    // Decode and queue audio data with improved error handling
                     console.log('Decoding base64 audio data...')
                     const audioData = atob(item.data)
-                    const audioArray = new Uint8Array(audioData.length)
+                    const audioArray = new Float32Array(audioData.length / 2)
+                    const dataView = new DataView(new ArrayBuffer(audioData.length))
+
                     for (let i = 0; i < audioData.length; i++) {
-                      audioArray[i] = audioData.charCodeAt(i)
+                      dataView.setUint8(i, audioData.charCodeAt(i))
+                    }
+
+                    for (let i = 0; i < audioArray.length; i++) {
+                      audioArray[i] = dataView.getInt16(i * 2, true) / 32768.0
                     }
 
                     if (audioArray.length > 0) {
@@ -232,18 +264,55 @@ const VoiceRecorder = () => {
     console.log('Audio data size:', audioData instanceof ArrayBuffer ? audioData.byteLength : 'N/A')
 
     try {
-      if (!audioContext.current) {
+      // Ensure AudioContext is created or resumed only when needed
+      if (!audioContext.current || audioContext.current.state === 'closed') {
         console.log('Creating new AudioContext with 24kHz sample rate')
-        audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 24000,
-          latencyHint: 'interactive'
-        })
-        console.log('AudioContext state:', audioContext.current.state)
+        try {
+          audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 24000,
+            latencyHint: 'interactive'
+          })
+          console.log('New AudioContext created, state:', audioContext.current.state)
 
-        if (audioContext.current.state === 'suspended') {
-          await audioContext.current.resume()
-          console.log('AudioContext resumed from suspended state')
+          // Add error handler for AudioContext state changes
+          audioContext.current.onstatechange = () => {
+            console.log('AudioContext state changed to:', audioContext.current.state)
+          }
+        } catch (error) {
+          console.error('Failed to create AudioContext:', error)
+          toast({
+            title: 'Audio System Error',
+            description: 'Failed to initialize audio playback system. Please refresh the page.',
+            status: 'error',
+            duration: 5000,
+            isClosable: true
+          })
+          throw new Error('Failed to initialize audio playback system')
         }
+      }
+
+      if (audioContext.current.state === 'suspended') {
+        try {
+          console.log('Attempting to resume AudioContext from suspended state')
+          await audioContext.current.resume()
+          console.log('AudioContext resumed successfully, state:', audioContext.current.state)
+        } catch (error) {
+          console.error('Failed to resume AudioContext:', error)
+          toast({
+            title: 'Audio System Error',
+            description: 'Failed to resume audio playback. Please try again.',
+            status: 'error',
+            duration: 3000,
+            isClosable: true
+          })
+          throw new Error('Failed to resume audio playback system')
+        }
+      }
+
+      // Validate audio data before processing
+      if (!audioData) {
+        console.error('No audio data provided for playback')
+        throw new Error('No audio data provided for playback')
       }
 
       if (isPlayingRef.current) {
@@ -257,45 +326,94 @@ const VoiceRecorder = () => {
       console.log('Processing audio data for playback...')
       let audioBuffer
       if (typeof audioData === 'string') {
-        // Convert base64 to ArrayBuffer
-        const base64Data = audioData.split(',')[1] || audioData
-        const binaryString = atob(base64Data)
-        const bytes = new Uint8Array(binaryString.length)
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i)
-        }
         try {
+          // Convert base64 to ArrayBuffer
+          const base64Data = audioData.split(',')[1] || audioData
+          console.log('Processing base64 audio data, length:', base64Data.length)
+          const binaryString = atob(base64Data)
+          console.log('Decoded binary string length:', binaryString.length)
+
+          // Create a Float32Array for better audio quality
+          const bytes = new Float32Array(binaryString.length / 2)
+          const dataView = new DataView(new ArrayBuffer(binaryString.length))
+
+          for (let i = 0; i < binaryString.length; i++) {
+            dataView.setUint8(i, binaryString.charCodeAt(i))
+          }
+
+          // Convert to 16-bit PCM samples
+          for (let i = 0; i < bytes.length; i++) {
+            bytes[i] = dataView.getInt16(i * 2, true) / 32768.0
+          }
+
+          console.log('Created Float32Array with length:', bytes.length)
           audioBuffer = await audioContext.current.decodeAudioData(bytes.buffer)
+          console.log('Successfully decoded audio data to PCM format')
         } catch (decodeError) {
           console.error('Failed to decode audio data:', decodeError)
+          toast({
+            title: 'Audio Processing Error',
+            description: 'Failed to decode audio response. The format may be invalid.',
+            status: 'error',
+            duration: 3000,
+            isClosable: true
+          })
           throw new Error('Invalid audio data format: Failed to decode base64 audio')
         }
       } else if (audioData instanceof ArrayBuffer) {
         try {
-          audioBuffer = await audioContext.current.decodeAudioData(audioData)
+          audioBuffer = await audioContext.current.decodeAudioData(audioData.slice(0))
+          console.log('Successfully decoded ArrayBuffer audio data')
         } catch (decodeError) {
           console.error('Failed to decode ArrayBuffer:', decodeError)
+          toast({
+            title: 'Audio Processing Error',
+            description: 'Failed to decode audio response. The format may be invalid.',
+            status: 'error',
+            duration: 3000,
+            isClosable: true
+          })
           throw new Error('Invalid audio data format: Failed to decode ArrayBuffer')
         }
       } else {
         throw new Error('Invalid audio data format: Expected base64 string or ArrayBuffer')
       }
 
-      console.log('Audio data decoded successfully')
+      console.log('Audio data decoded successfully:', {
+        duration: audioBuffer.duration,
+        numberOfChannels: audioBuffer.numberOfChannels,
+        sampleRate: audioBuffer.sampleRate,
+        length: audioBuffer.length
+      })
+
+      // Create and configure audio nodes
       const source = audioContext.current.createBufferSource()
       source.buffer = audioBuffer
 
+      // Create and configure gain node for volume control
       const gainNode = audioContext.current.createGain()
-      gainNode.gain.value = 1.0
+      gainNode.gain.value = 0.5 // Set initial volume to 50%
+
+      // Create analyzer node for debugging
+      const analyzerNode = audioContext.current.createAnalyser()
+      analyzerNode.fftSize = 2048
+
+      // Connect the audio graph
       source.connect(gainNode)
-      gainNode.connect(audioContext.current.destination)
+      gainNode.connect(analyzerNode)
+      analyzerNode.connect(audioContext.current.destination)
+
+      console.log('Audio nodes connected and configured')
 
       return new Promise((resolve, reject) => {
         source.onended = () => {
           console.log('Audio playback completed')
           isPlayingRef.current = false
           setIsPlaying(false)
+          // Clean up audio nodes
           source.disconnect()
+          gainNode.disconnect()
+          analyzerNode.disconnect()
           gainNode.disconnect()
 
           if (audioQueue.current.length > 0) {
@@ -322,7 +440,13 @@ const VoiceRecorder = () => {
         }
 
         try {
-          console.log('Starting audio playback...')
+          console.log('Starting audio playback with AudioContext sample rate:', audioContext.current.sampleRate)
+          console.log('Audio buffer details:', {
+            duration: source.buffer.duration,
+            numberOfChannels: source.buffer.numberOfChannels,
+            sampleRate: source.buffer.sampleRate,
+            length: source.buffer.length
+          })
           source.start(0)
           setIsPlaying(true)
         } catch (error) {
@@ -351,9 +475,10 @@ const VoiceRecorder = () => {
 
   const startRecording = async () => {
     if (readyState !== 1) {
+      console.log('WebSocket not ready, current state:', readyState)
       toast({
         title: 'Connection Error',
-        description: 'Waiting for connection to be established',
+        description: 'Waiting for connection to be established. Please try again.',
         status: 'warning',
         duration: 3000,
         isClosable: true
@@ -362,11 +487,29 @@ const VoiceRecorder = () => {
     }
 
     try {
+      console.log('Starting recording process...')
+      // Initialize AudioContext if needed
+      if (!audioContext.current || audioContext.current.state === 'closed') {
+        console.log('Creating new AudioContext for recording')
+        audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 24000,
+          latencyHint: 'interactive'
+        })
+      }
+
+      // Resume AudioContext if suspended
+      if (audioContext.current.state === 'suspended') {
+        console.log('Resuming suspended AudioContext')
+        await audioContext.current.resume()
+      }
+
+      // Check for microphone support and permissions
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.log('Microphone access not supported, switching to text mode')
         setIsTextMode(true)
         toast({
           title: 'Device Error',
-          description: 'Microphone access is not available in this environment. Using text input instead.',
+          description: 'Microphone access is not supported in this browser. Using text input instead.',
           status: 'info',
           duration: 5000,
           isClosable: true
@@ -374,6 +517,23 @@ const VoiceRecorder = () => {
         return
       }
 
+      // Initialize audio context if not already done
+      if (!audioContext.current || audioContext.current.state === 'closed') {
+        try {
+          console.log('Initializing AudioContext...')
+          audioContext.current = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 24000,
+            latencyHint: 'interactive'
+          })
+          await audioContext.current.resume()
+          console.log('AudioContext initialized successfully:', audioContext.current.state)
+        } catch (error) {
+          console.error('Failed to create AudioContext:', error)
+          throw new Error('Failed to initialize audio system')
+        }
+      }
+
+      console.log('Requesting microphone access...')
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 24000,
@@ -384,6 +544,7 @@ const VoiceRecorder = () => {
         }
       }).catch(error => {
         setIsTextMode(true)
+        console.error('Microphone access error:', error)
         if (error.name === 'NotAllowedError') {
           throw new Error('Microphone permission denied. Please allow microphone access and try again.')
         } else if (error.name === 'NotFoundError') {
@@ -393,37 +554,53 @@ const VoiceRecorder = () => {
         }
       })
 
-      const audioCtx = new AudioContext({ sampleRate: 24000 })
-      const source = audioCtx.createMediaStreamSource(stream)
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1)
+      console.log('Microphone access granted, setting up audio processing...')
+      const source = audioContext.current.createMediaStreamSource(stream)
+      const processor = audioContext.current.createScriptProcessor(4096, 1, 1)
       source.connect(processor)
-      processor.connect(audioCtx.destination)
+      processor.connect(audioContext.current.destination)
 
       processor.onaudioprocess = (e) => {
         if (readyState === 1 && sessionId) {
           try {
             const inputData = e.inputBuffer.getChannelData(0)
+            console.log('Processing audio buffer, length:', inputData.length)
             const pcmData = convertToPCM16(inputData)
             const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData)))
 
-            // Send audio buffer with session ID
-            sendMessage(JSON.stringify({
-              type: 'input_audio_buffer.append',
-              session: { id: sessionId },
-              data: base64Audio,
-              encoding: {
-                type: 'audio/pcm',
-                sample_rate: 24000,
-                bit_depth: 16,
-                channels: 1
-              }
-            }))
+            // Accumulate audio chunks and send less frequently
+            if (!mediaRecorder.audioChunks) {
+              mediaRecorder.audioChunks = []
+            }
+            mediaRecorder.audioChunks.push(base64Audio)
 
-            // Send commit message after buffer append
-            sendMessage(JSON.stringify({
-              type: 'input_audio_buffer.commit',
-              session: { id: sessionId }
-            }))
+            // Send accumulated chunks every ~500ms
+            if (mediaRecorder.audioChunks.length >= 12) { // ~12 chunks at 4096 samples
+              console.log('Sending accumulated audio chunks for session:', sessionId)
+
+              // Send audio buffer with session ID
+              for (const chunk of mediaRecorder.audioChunks) {
+                sendMessage(JSON.stringify({
+                  type: 'input_audio_buffer.append',
+                  session: { id: sessionId },
+                  data: chunk,
+                  encoding: {
+                    type: 'audio/pcm',
+                    sample_rate: 24000,
+                    bit_depth: 16,
+                    channels: 1
+                  }
+                }))
+              }
+
+              // Send commit message after all chunks
+              sendMessage(JSON.stringify({
+                type: 'input_audio_buffer.commit',
+                session: { id: sessionId }
+              }))
+
+              mediaRecorder.audioChunks = []
+            }
           } catch (error) {
             console.error('Error processing audio:', error)
             toast({
@@ -436,13 +613,14 @@ const VoiceRecorder = () => {
           }
         }
       }
-      setMediaRecorder({ stream, audioCtx, processor, source })
+      setMediaRecorder({ stream, audioContext: audioContext.current, processor, source })
       setIsRecording(true)
       setIsProcessing(true)
       setCitations([])
       setTranscript('')
       setResponseReceived(false)
 
+      console.log('Recording started successfully')
       toast({
         title: 'Recording Started',
         description: 'Microphone is now active and recording',
@@ -463,45 +641,39 @@ const VoiceRecorder = () => {
     }
   }
 
+javascript
   const stopRecording = useCallback(() => {
     if (mediaRecorder && isRecording) {
       try {
+        // Stop all tracks and disconnect nodes
         mediaRecorder.stream.getTracks().forEach(track => track.stop())
         mediaRecorder.source.disconnect()
         mediaRecorder.processor.disconnect()
-        mediaRecorder.audioCtx.close()
+
+        // Don't close AudioContext here as it may be needed for playback
         setIsRecording(false)
 
-        // Send audio input message
+        // Send final audio buffer commit
+        const commitMessage = {
+          type: 'input_audio_buffer.commit',
+          session: { id: sessionId }
+        }
+        console.log('Sending final audio buffer commit:', commitMessage)
+        sendMessage(JSON.stringify(commitMessage))
+
+        // Send conversation item create message
         const audioMessage = {
           type: 'conversation.item.create',
           session: { id: sessionId },
           content: [{
-            type: 'message',
-            content: mediaRecorder.lastAudioBuffer || '',
+            type: 'text',
+            text: 'Audio message processed',
             role: 'user'
           }]
         }
-        console.log('Sending audio message:', audioMessage)
+        console.log('Sending conversation item:', audioMessage)
         sendMessage(JSON.stringify(audioMessage))
 
-        // Request AI response
-        const responseMessage = {
-          type: 'response.create',
-          session: { id: sessionId },
-          content: [{
-            type: 'message',
-            role: 'assistant'
-          }],
-          output_format: {
-            type: 'audio',
-            format: 'pcm_16',
-            sample_rate: 24000,
-            channels: 1
-          }
-        }
-        console.log('Requesting AI response:', responseMessage)
-        sendMessage(JSON.stringify(responseMessage))
       } catch (error) {
         console.error('Error stopping recording:', error)
         toast({
