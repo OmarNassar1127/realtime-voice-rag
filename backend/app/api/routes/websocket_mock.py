@@ -14,15 +14,38 @@ class MockConnectionManager:
         self.rag_service = MockRAGService()
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept(subprotocol="realtime")
-        self.active_connections[websocket] = {"session_id": "mock_session"}
+        try:
+            # Validate WebSocket protocol
+            protocols = websocket.scope.get("subprotocols", [])
+            if "realtime" not in protocols:
+                logger.warning("Connection rejected: Missing 'realtime' protocol")
+                await websocket.close(code=4000, reason="Missing 'realtime' protocol")
+                return
 
-        # Send connection established message
-        await websocket.send_json({
-            "type": "connection_established",
-            "message": "WebSocket connection established successfully",
-            "protocol": "realtime"
-        })
+            # Accept connection with realtime protocol
+            await websocket.accept(subprotocol="realtime")
+
+            # Generate unique session ID
+            session_id = f"mock_session_{len(self.active_connections) + 1}"
+            self.active_connections[websocket] = {
+                "session_id": session_id,
+                "created_at": asyncio.get_event_loop().time()
+            }
+
+            # Send connection established message
+            await websocket.send_json({
+                "type": "session.created",
+                "session": {
+                    "id": session_id,
+                    "created_at": self.active_connections[websocket]["created_at"]
+                }
+            })
+            logger.info(f"WebSocket connection established with session ID: {session_id}")
+
+        except Exception as e:
+            logger.error(f"Error establishing WebSocket connection: {str(e)}")
+            await websocket.close(code=1011, reason="Internal server error")
+            return
 
     async def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
