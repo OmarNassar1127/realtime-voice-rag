@@ -12,6 +12,7 @@ class MockConnectionManager:
     def __init__(self):
         self.active_connections = {}
         self.rag_service = MockRAGService()
+        self.audio_buffers = {}  # Store audio buffers per session
 
     async def connect(self, websocket: WebSocket):
         try:
@@ -31,6 +32,8 @@ class MockConnectionManager:
                 "session_id": session_id,
                 "created_at": asyncio.get_event_loop().time()
             }
+            # Initialize audio buffer for the session
+            self.audio_buffers[session_id] = []
 
             # Send connection established message
             await websocket.send_json({
@@ -49,27 +52,88 @@ class MockConnectionManager:
 
     async def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
+            session_id = self.active_connections[websocket]["session_id"]
+            if session_id in self.audio_buffers:
+                del self.audio_buffers[session_id]
             del self.active_connections[websocket]
 
     async def handle_message(self, websocket: WebSocket, message_data: dict):
         try:
-            # Simulate processing delay
-            await asyncio.sleep(1)
+            session_id = self.active_connections[websocket]["session_id"]
+            message_type = message_data.get("type")
 
-            if message_data.get("type") == "message":
-                # Get enhanced response using RAG service
+            # Handle session update
+            if message_type == "session.update":
+                await websocket.send_json({
+                    "type": "session.update.ack",
+                    "session": {"id": session_id}
+                })
+                return
+
+            # Handle audio buffer append
+            if message_type == "input_audio_buffer.append":
+                if "data" in message_data:
+                    self.audio_buffers[session_id].append(message_data["data"])
+                await websocket.send_json({
+                    "type": "input_audio_buffer.append.ack",
+                    "session": {"id": session_id}
+                })
+                return
+
+            # Handle audio buffer commit
+            if message_type == "input_audio_buffer.commit":
+                # Clear buffer after processing
+                self.audio_buffers[session_id] = []
+                await websocket.send_json({
+                    "type": "input_audio_buffer.commit.ack",
+                    "session": {"id": session_id}
+                })
+                return
+
+            # Handle conversation item create
+            if message_type == "conversation.item.create":
+                content = message_data.get("content", [{}])[0].get("text", "")
+                enhanced_message = await self.rag_service.enhance_message_with_context(content)
+
+                await websocket.send_json({
+                    "type": "conversation.item.created",
+                    "session": {"id": session_id}
+                })
+                return
+
+            # Handle response create
+            if message_type == "response.create":
+                mock_audio = self.rag_service.get_mock_audio()
+                output_format = {
+                    "type": "audio",
+                    "format": "pcm_16",
+                    "sample_rate": 24000,
+                    "channels": 1
+                }
+                await websocket.send_json({
+                    "type": "response.created",
+                    "session": {"id": session_id},
+                    "content": [{
+                        "type": "audio",
+                        "format": "pcm_16",
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "data": mock_audio
+                    }],
+                    "output_format": output_format
+                })
+                return
+
+            # Handle legacy message type
+            if message_type == "message":
                 enhanced_message = await self.rag_service.enhance_message_with_context(
                     message_data.get("content", "")
                 )
-
-                # Send RAG-enhanced text response
                 await websocket.send_json({
                     "type": "message",
                     "role": "assistant",
                     "content": enhanced_message,
                 })
-
-                # Send mock audio response with proper format
                 await websocket.send_json({
                     "type": "audio",
                     "format": "pcm_16",
@@ -77,8 +141,9 @@ class MockConnectionManager:
                     "channels": 1,
                     "data": self.rag_service.get_mock_audio()
                 })
-            else:
-                logger.warning(f"Unsupported message type: {message_data.get('type')}")
+                return
+
+            logger.warning(f"Unsupported message type: {message_type}")
 
         except Exception as e:
             logger.error(f"Error in handle_message: {str(e)}")
