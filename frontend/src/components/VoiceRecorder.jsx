@@ -641,7 +641,7 @@ const VoiceRecorder = () => {
     }
   }
 
-javascript
+
   const stopRecording = useCallback(() => {
     if (mediaRecorder && isRecording) {
       try {
