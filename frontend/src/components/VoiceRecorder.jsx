@@ -30,6 +30,7 @@ const VoiceRecorder = () => {
   const [transcript, setTranscript] = useState('')
   const [isTextMode, setIsTextMode] = useState(false)
   const [textInput, setTextInput] = useState('')
+
   const [sessionId, setSessionId] = useState(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [responseReceived, setResponseReceived] = useState(false)
