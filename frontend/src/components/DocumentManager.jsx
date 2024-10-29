@@ -26,7 +26,7 @@ const DocumentManager = () => {
         throw new Error('Failed to fetch documents');
       }
       const data = await response.json();
-      setDocuments(data.files.map(name => ({ id: name, name })));
+      setDocuments((data?.files || []).map(name => ({ id: name, name })));
     } catch (error) {
       console.error('Fetch error:', error);
       toast({
