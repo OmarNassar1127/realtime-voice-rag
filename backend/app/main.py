@@ -1,7 +1,6 @@
-from fastapi import FastAPI, WebSocket, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import api_router
-from app.api.routes.websocket_simple import websocket_endpoint
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 import logging
@@ -24,9 +23,6 @@ app.add_middleware(
     expose_headers=["*", "upgrade", "sec-websocket-accept",
                    "sec-websocket-protocol", "sec-websocket-version"],
 )
-
-# Add WebSocket endpoint directly
-app.add_api_websocket_route("/ws", websocket_endpoint)
 
 # Include API router
 app.include_router(api_router, prefix="/api")
