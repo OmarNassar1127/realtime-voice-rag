@@ -25,7 +25,6 @@ class ConnectionManager:
         self.rag_manager = RAGManager()
         self.session_ids: Dict[WebSocket, str] = {}
 
-python
     async def connect(self, websocket: WebSocket):
         try:
             await websocket.accept()
