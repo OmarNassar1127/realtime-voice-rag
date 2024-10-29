@@ -32,3 +32,8 @@ class MockRAGService:
     def get_mock_audio(self) -> str:
         """Get mock audio data."""
         return self.mock_audio
+
+    async def get_documents(self) -> List[Dict[str, Any]]:
+        """Get list of processed documents."""
+        return [{"id": str(i), "content": doc["content"], "metadata": doc["metadata"]}
+                for i, doc in enumerate(self.documents)]

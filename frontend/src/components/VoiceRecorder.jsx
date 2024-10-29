@@ -4,7 +4,7 @@ import { FaMicrophone, FaStop, FaVolumeUp } from 'react-icons/fa'
 import useWebSocket from 'react-use-websocket'
 
 // Hardcoded WebSocket URL as per documentation
-const WEBSOCKET_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000/ws`
+const WEBSOCKET_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000/api/ws`
 
 // Function to convert audio buffer to PCM 16-bit
 const convertToPCM16 = (audioBuffer) => {
